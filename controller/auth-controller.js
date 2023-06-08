@@ -3,6 +3,7 @@ import HashService from '../services/hash-service.js'
 import UserService from '../services/user-service.js'
 import TokenService from '../services/token-service.js'
 import UserDto from '../dtos/user-dto.js'
+// import tokenService from '../services/token-service.js'
 
 class AuthController {
 
@@ -46,14 +47,15 @@ class AuthController {
         const { phone, otp, hash } = req.body
 
         if (!otp || !hash || !phone) {
-            return res.status(400).json({ message: "all fields are required" })
+            return res.status(400).json({ message: "all fields are required", auth: false })
         }
 
         const [hashOtp, expires] = hash.split(".")
 
         if (Date.now() > expires) {
             return res.status(400).json({
-                message: "OTP expired"
+                message: "OTP expired",
+                auth: false
             })
         }
 
@@ -61,10 +63,9 @@ class AuthController {
 
         const isValid = await OtpService.verifyOtp(data, hashOtp)
 
-        console.log(isValid)
 
         if (!isValid) {
-            return res.status(400).json({ message: "invalid OTP" })
+            return res.status(400).json({ message: "invalid OTP", auth: false })
         }
 
         let user;
@@ -73,30 +74,107 @@ class AuthController {
 
             user = await UserService.findUser(phone)
 
-            // console.log(user)
-
             if (!user) {
                 user = await UserService.CreateUser(phone)
-                console.log(user)
             }
 
         } catch (error) {
-            console.log(error)
-            res.status(500).json({ message: "DB error" })
+            return res.status(500).json({ message: "DB error" })
         }
 
         /**
          * Tokens
          */
 
-        const { accessToken, refreshToken } = TokenService.generateTokens({ _id: user._id, activated: false })
+        const { accessToken, refreshToken } = TokenService.generateTokens({ _id: user._id, activated: user.activated })
 
-        res.cookie("refreshtoken", refreshToken, {
+        await TokenService.storeRefreshToken(refreshToken, user._id)
+
+        res.cookie("refreshToken", refreshToken, {
             maxAge: 1000 * 60 * 60 * 24 * 30, // 30 days
             httpOnly: true
         })
+
+        res.cookie("accessToken", accessToken, {
+            maxAge: 1000 * 60 * 60 * 24 * 30, // 30 days
+            httpOnly: true
+        })
+
         const details = new UserDto(user)
-        res.json({ accessToken, user: details })
+        res.json({ user: details, auth: true })
+    }
+
+    async refresh(req, res) {
+        // get refresh token from cookie
+        const { refreshToken: oldRefreshToken } = req.cookies
+
+        // console.log(oldRefreshToken)
+
+        // check if token is valid
+        let userData;
+        try {
+            userData = await TokenService.verifyRefreshToken(oldRefreshToken)
+        } catch (error) {
+            return res.status(401).json({
+                message: "invalid token"
+            })
+        }
+
+        // check if token is in database
+        try {
+            const token = await TokenService.findRefreshToken(userData._id, oldRefreshToken)
+
+            if (!token) {
+                return res.status(401).json({ message: "Invalid Token" })
+            }
+        } catch (error) {
+            return res.status(500).json({ message: "Internal error" })
+        }
+
+        // check if valid user
+        const user = await UserService.findUserById(userData._id)
+
+        if (!user) {
+            return res.status(404).json({ message: "no user" })
+        }
+
+        // generate new tokens
+
+        const { refreshToken, accessToken } = await TokenService.generateTokens({ _id: userData._id })
+
+        // update refresh token
+        try {
+            await TokenService.updateRefreshToken(userData._id, refreshToken)
+        } catch (error) {
+            return res.status(500).json({ message: "Internal error" })
+        }
+
+        // put in cookies
+        res.cookie("refreshToken", refreshToken, {
+            maxAge: 1000 * 60 * 60 * 24 * 30, // 30 days
+            httpOnly: true
+        })
+
+        res.cookie("accessToken", accessToken, {
+            maxAge: 1000 * 60 * 60 * 24 * 30, // 30 days
+            httpOnly: true
+        })
+
+        // response
+        const details = new UserDto(user)
+        res.json({ user: details, auth: true })
+    }
+
+    /**
+     * Logout
+     */
+
+    async logout(req, res) {
+        const { refreshToken } = req.cookies
+        await TokenService.removeToken(refreshToken)
+        res.clearCookie('refreshToken')
+        res.clearCookie('accessToken')
+        res.json({ user: null, auth: false })
     }
 }
 

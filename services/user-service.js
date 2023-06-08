@@ -18,6 +18,10 @@ class UserService {
             console.log(error)
         }
     }
+
+    async findUserById(_id) {
+        return await UserModel.findById(_id)
+    }
 }
 
 export default new UserService()
